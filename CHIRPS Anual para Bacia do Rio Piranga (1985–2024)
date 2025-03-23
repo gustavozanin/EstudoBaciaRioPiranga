@@ -1,0 +1,48 @@
+// 1. Importar a bacia e o limite de Minas Gerais
+var bacia = ee.FeatureCollection("projects/ee-zanin/assets/MAPBIOMAS/RioPiranga");
+
+var mg = ee.FeatureCollection('FAO/GAUL/2015/level1')
+            .filter(ee.Filter.eq('ADM1_NAME', 'Minas Gerais'));
+
+// 2. Carregar dados CHIRPS
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+               .filterDate('1985-01-01', '2024-12-31')
+               .filterBounds(mg);
+
+// 3. Criar lista de anos
+var anos = ee.List.sequence(1985, 2024);
+
+// 4. Função para calcular precipitação anual e recortar à bacia
+var gerarAnual = function(ano) {
+  ano = ee.Number(ano);
+  var inicio = ee.Date.fromYMD(ano, 1, 1);
+  var fim = inicio.advance(1, 'year');
+
+  var soma = chirps.filterDate(inicio, fim).sum()
+              .clip(bacia)
+              .rename(ee.String('precip_').cat(ano.format()))
+              .set('ano', ano)
+              .set('system:time_start', inicio.millis());
+
+  return soma;
+};
+
+// 5. Aplicar a função para cada ano
+var colecaoAnual = ee.ImageCollection(anos.map(gerarAnual));
+
+// 6. Exportar os rasters para o Google Drive
+anos.evaluate(function(lista) {
+  lista.forEach(function(ano) {
+    var imagem = colecaoAnual.filter(ee.Filter.eq('ano', ano)).first();
+    Export.image.toDrive({
+      image: imagem,
+      description: 'CHIRPS_Anual_' + ano,
+      folder: 'CHIRPS_MG',
+      fileNamePrefix: 'CHIRPS_Anual_' + ano,
+      region: bacia.geometry(),
+      scale: 5000,
+      crs: 'EPSG:4326',
+      maxPixels: 1e13
+    });
+  });
+});
