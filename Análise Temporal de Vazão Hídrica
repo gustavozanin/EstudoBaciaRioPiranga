@@ -1,0 +1,181 @@
+# Instalar pacotes necessários
+!pip install pymannkendall tqdm matplotlib
+
+# Importando bibliotecas necessárias
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import pymannkendall as mk
+from tqdm import tqdm  # Para barra de progresso
+from numpy.polynomial.polynomial import Polynomial  # Para ajuste da linha de tendência
+from IPython.display import Image, display  # Para exibir imagens diretamente no Colab
+
+# --- Configuração dos Diretórios e Lista de Estações ---
+INPUT_DIR_LOCAL = '/content/drive/MyDrive/**/EstudoVazao/Vazao'
+OUTPUT_DIR_LOCAL = '/content/drive/MyDrive/*/EstudoVazao/Resultados'
+MK_ALPHA_GLOBAL = 0.05  # Nível de significância para o teste de Mann-Kendall e anotações
+
+# Lista de estações e arquivos
+estacoes_para_processar = [
+    ('56028000_corrigido.csv', "Piranga"),
+    ('56110005_corrigido.csv', "Ponte Nova Jusante"),
+    ('56335001_corrigido.csv', "Acaiaca-Jusante"),
+    ('56385000_corrigido.csv', "São Miguel do Anta"),
+    ('56425000_corrigido.csv', "Fazenda Cachoeira DAntas"),
+    ('56484998_corrigido.csv', "Raul Soares Montante"),
+    ('56539000_corrigido.csv', "Cachoeira dos Óculos - Montante")
+]
+
+# Função para calcular o percentil 95 dos dados de vazão (para eventos extremos)
+def identificar_eventos_extremos(df):
+    """Identifica eventos extremos com base no percentil 95 da vazão."""
+    if 'Vazao' not in df.columns or df['Vazao'].isnull().all():
+        print(f"Aviso: Coluna 'Vazao' não encontrada ou contém apenas NaNs. Não é possível calcular o limiar extremo.")
+        return pd.DataFrame(columns=df.columns), np.nan
+
+    limiar_extremo = np.percentile(df['Vazao'].dropna(), 95)
+    eventos_extremos = df[df['Vazao'] > limiar_extremo]
+    return eventos_extremos, limiar_extremo
+
+# Função para aplicar o teste de Mann-Kendall
+def realizar_teste_mann_kendall(df, alpha=0.05):
+    """Aplica o teste de Mann-Kendall para detectar tendências nos dados."""
+    if 'Vazao' not in df.columns or df['Vazao'].dropna().nunique() < 2 or len(df['Vazao'].dropna()) < 10:
+        print(f"Aviso: Dados insuficientes ou sem variância na coluna 'Vazao' para o teste de Mann-Kendall.")
+        class MockMKResult:
+            def __init__(self):
+                self.trend = 'N/A (dados insuficientes)'
+                self.h = False  # Hipótese nula (sem tendência) não rejeitada
+                self.p = np.nan  # p-valor
+                self.z = np.nan  # Estatística Z
+                self.Tau = np.nan  # Tau de Kendall
+                self.s = np.nan  # Estatística S
+                self.var_s = np.nan  # Variância de S
+                self.slope = np.nan  # Inclinação de Sen
+                self.intercept = np.nan  # Intercepto de Sen
+        return MockMKResult()
+    result = mk.original_test(df['Vazao'].dropna(), alpha=alpha)
+    return result
+
+# Função para gerar gráficos de série temporal, tendências e eventos extremos
+def gerar_graficos_cientificos_e_exibir(df, codigo_estacao, nome_estacao, output_dir_func, mk_alpha=0.05):
+    """Gera gráficos para a série temporal de vazão e eventos extremos com estilo mais científico e exibe no Colab."""
+    eventos_extremos, limiar_extremo = identificar_eventos_extremos(df)
+    resultado_mk = realizar_teste_mann_kendall(df, alpha=mk_alpha)
+
+    fig, ax = plt.subplots(figsize=(16, 8), dpi=300)
+
+    # Plot da série temporal de vazão diária
+    ax.plot(df.index, df['Vazao'], color='royalblue', label='Vazão Diária Observada', linewidth=2.0)
+
+    # Plot da média móvel de 365 dias
+    df['Média Móvel (365 dias)'] = df['Vazao'].rolling(window=365, min_periods=150, center=True).mean()
+    ax.plot(df.index, df['Média Móvel (365 dias)'], color='darkred', label='Média Móvel (365 dias)', linewidth=2.5)
+
+    # Plot dos eventos extremos, se houver
+    if not eventos_extremos.empty:
+        ax.scatter(eventos_extremos.index, eventos_extremos['Vazao'], 
+                   color='red', label=f'Eventos Extremos (>P95 = {limiar_extremo:.2f} m³/s)', 
+                   zorder=5, s=50, edgecolor='black', alpha=0.8)
+    else:
+        ax.scatter([], [], color='red', label=f'Eventos Extremos (>P95 = {limiar_extremo:.2f} m³/s)', s=50, edgecolor='black', alpha=0.8)
+
+    # Calcular e plotar a linha de tendência (ajuste linear)
+    if not df.empty and not df['Vazao'].isnull().all() and len(df.index) > 1:
+        x_numeric = mdates.date2num(df.index.to_pydatetime())
+        y_numeric = df['Vazao'].values
+
+        valid_indices = ~np.isnan(x_numeric) & ~np.isnan(y_numeric) & ~np.isinf(x_numeric) & ~np.isinf(y_numeric)
+        if np.sum(valid_indices) > 1:
+            try:
+                p = Polynomial.fit(x_numeric[valid_indices], y_numeric[valid_indices], 1)
+                ax.plot(df.index, p(x_numeric), color='black', label='Linha de Tendência (Linear)', linewidth=2.0, linestyle='--')
+            except Exception as e_polyfit:
+                print(f"Aviso [{codigo_estacao}]: Não foi possível calcular a linha de tendência linear. Erro: {e_polyfit}")
+        else:
+            print(f"Aviso [{codigo_estacao}]: Não há dados válidos suficientes para calcular a linha de tendência linear.")
+
+    # Ajuste do eixo Y para começar do zero
+    ax.set_ylim(bottom=0)
+
+    # Informações do Teste de Mann-Kendall para o título
+    p_valor_str = f'{resultado_mk.p:.2e}' if not np.isnan(resultado_mk.p) else 'N/A'  # Formato científico para p-valor
+    slope_str = f'{resultado_mk.slope:.4f}' if hasattr(resultado_mk, 'slope') and not np.isnan(resultado_mk.slope) else 'N/A'
+
+    tendencia_mk_desc = resultado_mk.trend
+    if not np.isnan(resultado_mk.p):
+        if resultado_mk.trend == 'increasing':
+            tendencia_mk_desc = 'Crescente'
+            tendencia_mk_desc += ' Significativa' if resultado_mk.p < mk_alpha else ' (Não Sig.)'
+        elif resultado_mk.trend == 'decreasing':
+            tendencia_mk_desc = 'Decrescente'
+            tendencia_mk_desc += ' Significativa' if resultado_mk.p < mk_alpha else ' (Não Sig.)'
+        elif resultado_mk.trend == 'no trend':
+            tendencia_mk_desc = 'Sem Tendência Significativa'
+
+    titulo_linha1 = f"Variação da Vazão e Eventos Extremos - Estação: {codigo_estacao} ({nome_estacao})"
+    titulo_linha2 = f"Tendência (Mann-Kendall): {tendencia_mk_desc}, P-valor: {p_valor_str}, Inclinação (Sen): {slope_str}"
+
+    ax.set_title(f"{titulo_linha1}\n{titulo_linha2}", fontsize=14, pad=10)  # Título principal com duas linhas
+
+    ax.set_xlabel("Ano", fontsize=12, labelpad=10)
+    ax.set_ylabel("Vazão (m³/s)", fontsize=12, labelpad=10)
+    ax.grid(True, linestyle=':', alpha=0.5)  # Grade pontilhada e mais sutil
+    ax.legend(loc='upper left', fontsize=10, frameon=False)
+
+    ax.xaxis.set_major_locator(mdates.YearLocator(base=5))
+    ax.xaxis.set_minor_locator(mdates.YearLocator(base=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+    plt.xticks(rotation=30, ha='right', fontsize=10)  # Fonte dos ticks X menor
+    ax.tick_params(axis='y', labelsize=10)  # Fonte dos ticks Y menor
+
+    if not df.empty:
+        ax.set_xlim(df.index.min(), df.index.max())
+
+    safe_nome_estacao = nome_estacao.replace(' ', '_').replace("'", "")
+    output_filename = f"{codigo_estacao}_{safe_nome_estacao}_estilo_referencia.png"
+    output_path = os.path.join(output_dir_func, output_filename)
+
+    os.makedirs(output_dir_func, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    display(Image(filename=output_path))  # Exibindo a imagem diretamente no Colab
+    plt.close(fig)
+
+    print(f"Gráfico estilo referência salvo e exibido em: {output_path}")
+    return output_path
+
+# Processando as estações e gerando gráficos com exibição direta no Colab
+resultados_gerais_cientificos = []
+
+for file_name, nome_estacao in tqdm(estacoes_para_processar, desc="Processando Estações com estilo científico"):
+    file_path = os.path.join(INPUT_DIR_LOCAL, file_name)
+
+    if not os.path.exists(file_path):
+        print(f"Aviso: Arquivo não encontrado - {file_path}. Pulando estação {nome_estacao}.")
+        continue
+
+    try:
+        df = pd.read_csv(file_path, sep=',', decimal=',')
+        df.columns = ['Index', 'Dia', 'Mes', 'Ano', 'Vazao', 'Data']
+        df = df.drop(columns=['Index'])  # Remove the 'Index' column
+        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
+        df.set_index('Data', inplace=True)
+
+        df['Vazao'] = pd.to_numeric(df['Vazao'], errors='coerce')
+        df.dropna(subset=['Vazao'], inplace=True)
+
+        # Gerar gráfico para a estação atual com estilo científico e exibição no Colab
+        output_path = gerar_graficos_cientificos_e_exibir(df, file_name.split('_')[0], nome_estacao, OUTPUT_DIR_LOCAL)
+        resultados_gerais_cientificos.append({
+            'codigo_estacao': file_name.split('_')[0],
+            'nome_estacao': nome_estacao,
+            'caminho_grafico': output_path
+        })
+    except Exception as e_proc:
+        print(f"Erro ao processar {file_name}: {e_proc}")
+
+# Exibindo os resultados com estilo científico
+resultados_gerais_cientificos
